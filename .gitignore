@@ -1,0 +1,60 @@
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+*.env
+.env.local
+.env.*.local
+secrets.json
+credentials.json
+
+# ── AI development tools ──────────────────────────────────────────────────────
+# Claude Code
+.claude/
+# Cursor
+.cursor/
+.cursorignore
+.cursorindexingignore
+# GitHub Copilot
+.github/copilot-instructions.md
+# Windsurf
+.windsurf/
+# Codeium
+.codeium/
+# Aider
+.aider*
+# Continue
+.continue/
+
+# ── Python build artefacts ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS artefacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Data (keep folder, ignore contents by default) ───────────────────────────
+data/*
+!data/.gitkeep
