@@ -21,7 +21,15 @@ logged and the remaining files are still processed.
 """
 import argparse
 import logging
+import sys
 from pathlib import Path
+
+# Ensure the project root is on sys.path so `chefai` is importable when the
+# script is run directly (e.g. `python scripts/build_corpus.py`) without the
+# package being installed in the active Python environment.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from chefai.extractor import export_corpus_to_json, parse_preparazioni_md
 
