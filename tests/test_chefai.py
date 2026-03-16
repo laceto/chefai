@@ -5,14 +5,17 @@ Coverage targets:
 - extractor.sanitize_filename
 - extractor.parse_preparazioni_md  (happy path, failure modes, edge cases)
 - extractor.export_recipes_to_markdown  (round-trip, duplicate titles)
+- extractor.export_recipes_to_json  (creates files, omits raw_text, dedup, guards)
 """
 
+import json
 from pathlib import Path
 
 import pytest
 
 import chefai
 from chefai.extractor import (
+    export_recipes_to_json,
     export_recipes_to_markdown,
     parse_preparazioni_md,
     sanitize_filename,
@@ -24,6 +27,7 @@ from chefai.extractor import (
 
 #: Path to the real processed file used in production.
 PREPARAZIONI_PATH = Path("data/processed/preparazioni-di-base.md")
+ANTIPASTI_MARE_PATH = Path("data/processed/antipasti-di-mare.md")
 
 
 def _minimal_md(text_block: str, titolo: str = "TEST SECTION") -> str:
@@ -214,6 +218,139 @@ def test_parse_instruction_paragraphs_split(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# parse_preparazioni_md — "INGREDIENTI PER N PERSONE" format
+# ---------------------------------------------------------------------------
+
+
+def test_parse_ingredienti_per_persone_triggers_ingredient_mode(tmp_path: Path):
+    """'INGREDIENTI PER 4 PERSONE' must enter ingredient mode, not fall through."""
+    md = _minimal_md(
+        "--- pagina 1 ---\n"
+        "ACCIUGHE AL VERDE\n"
+        "PREPARAZIONE: 20 MINUTI, COTTURA: NO\n"
+        "DIFFICOLTÀ: *\n"
+        "INGREDIENTI PER 4 PERSONE\n"
+        "20 ACCIUGHE SOTTO SALE,\n"
+        "1 DL DI OLIO EXTRAVERGINE DI OLIVA\n"
+        "Dissalate le acciughe sotto acqua corrente.\n"
+    )
+    f = tmp_path / "test.md"
+    f.write_text(md, encoding="utf-8")
+
+    recipes = parse_preparazioni_md(f)
+
+    assert len(recipes) == 1
+    r = recipes[0]
+    assert r["title"] == "Acciughe Al Verde"
+    assert "20 ACCIUGHE SOTTO SALE" in r["ingredients"]
+    assert "1 DL DI OLIO EXTRAVERGINE DI OLIVA" in r["ingredients"]
+    assert r["instructions"]
+
+
+def test_parse_servings_extracted_from_ingredienti_header(tmp_path: Path):
+    """Servings count is extracted from 'INGREDIENTI PER 4 PERSONE'."""
+    md = _minimal_md(
+        "--- pagina 1 ---\n"
+        "ACCIUGHE AL VERDE\n"
+        "INGREDIENTI PER 4 PERSONE\n"
+        "20 ACCIUGHE SOTTO SALE\n"
+        "Dissalate le acciughe.\n"
+    )
+    f = tmp_path / "test.md"
+    f.write_text(md, encoding="utf-8")
+
+    recipes = parse_preparazioni_md(f)
+
+    assert recipes[0].get("servings") == "4"
+
+
+# ---------------------------------------------------------------------------
+# parse_preparazioni_md — metadata lines (PREPARAZIONE / COTTURA / DIFFICOLTÀ)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_metadata_lines_extracted_to_fields(tmp_path: Path):
+    """PREPARAZIONE, COTTURA, DIFFICOLTÀ lines populate the matching recipe fields."""
+    md = _minimal_md(
+        "--- pagina 1 ---\n"
+        "BACCALÀ MARINATO\n"
+        "PREPARAZIONE: 30 MINUTI\n"
+        "COTTURA: NO\n"
+        "DIFFICOLTÀ: **\n"
+        "INGREDIENTI PER 4 PERSONE\n"
+        "400 G DI BACCALÀ\n"
+        "Asciugate il baccalà.\n"
+    )
+    f = tmp_path / "test.md"
+    f.write_text(md, encoding="utf-8")
+
+    recipes = parse_preparazioni_md(f)
+
+    assert len(recipes) == 1
+    r = recipes[0]
+    assert r.get("prep_time") == "30 MINUTI"
+    assert r.get("cook_time") == "NO"
+    assert r.get("difficulty") == "**"
+
+
+def test_parse_metadata_inline_single_line(tmp_path: Path):
+    """All three fields on one line are each extracted correctly."""
+    md = _minimal_md(
+        "--- pagina 1 ---\n"
+        "ACCIUGHE AL VERDE\n"
+        "PREPARAZIONE: 20 MINUTI, COTTURA: NO, DIFFICOLTÀ: *\n"
+        "INGREDIENTI PER 4 PERSONE\n"
+        "20 ACCIUGHE,\n"
+        "1 DL DI OLIO\n"
+        "Dissalate le acciughe.\n"
+    )
+    f = tmp_path / "test.md"
+    f.write_text(md, encoding="utf-8")
+
+    recipes = parse_preparazioni_md(f)
+
+    r = recipes[0]
+    assert r.get("prep_time") == "20 MINUTI"
+    assert r.get("cook_time") == "NO"
+    assert r.get("difficulty") == "*"
+
+
+def test_parse_metadata_not_treated_as_recipe_title(tmp_path: Path):
+    """
+    Regression: DIFFICOLTÀ: * is ALL-CAPS with no digits and no units.
+    Without the ':' guard in _is_recipe_title it would open a spurious recipe.
+    """
+    md = _minimal_md(
+        "--- pagina 1 ---\n"
+        "ACCIUGHE AL VERDE\n"
+        "PREPARAZIONE: 20 MINUTI, COTTURA: NO\n"
+        "DIFFICOLTÀ: *\n"
+        "INGREDIENTI PER 4 PERSONE\n"
+        "20 ACCIUGHE,\n"
+        "1 DL DI OLIO\n"
+        "Dissalate le acciughe.\n"
+        "ACCIUGHE CRUDE\n"
+        "PREPARAZIONE: 30 MINUTI, COTTURA: NO\n"
+        "DIFFICOLTÀ: *\n"
+        "INGREDIENTI PER 4 PERSONE\n"
+        "500 G DI ACCIUGHE\n"
+        "Pulite le acciughe.\n"
+    )
+    f = tmp_path / "test.md"
+    f.write_text(md, encoding="utf-8")
+
+    recipes = parse_preparazioni_md(f)
+    titles = [r["title"] for r in recipes]
+
+    assert len(recipes) == 2, f"Expected 2 recipes, got {len(recipes)}: {titles}"
+    assert "Acciughe Al Verde" in titles
+    assert "Acciughe Crude" in titles
+    # Metadata lines must NOT appear as recipe titles
+    assert not any("Difficolt" in t for t in titles)
+    assert not any("Preparazione" in t for t in titles)
+
+
+# ---------------------------------------------------------------------------
 # parse_preparazioni_md — integration test against the real source file
 # ---------------------------------------------------------------------------
 
@@ -258,6 +395,53 @@ def test_parse_real_file_known_recipes():
     burro = by_title["Burro Chiarificato"]
     assert 17 in burro["pages"]
     assert 18 in burro["pages"]
+
+
+@pytest.mark.skipif(
+    not ANTIPASTI_MARE_PATH.exists(),
+    reason="Real source file not present (data/processed/antipasti-di-mare.md)",
+)
+def test_parse_antipasti_di_mare_all_recipes_have_ingredients():
+    """Every recipe in antipasti-di-mare.md (INGREDIENTI PER N PERSONE format) has ingredients."""
+    recipes = parse_preparazioni_md(ANTIPASTI_MARE_PATH)
+
+    assert len(recipes) > 0, "No recipes parsed — INGREDIENTI header likely not recognised"
+    for r in recipes:
+        assert r["ingredients"], (
+            f"{r['title']!r} has no ingredients — "
+            "'INGREDIENTI PER N PERSONE' may not have been recognised"
+        )
+
+
+@pytest.mark.skipif(
+    not ANTIPASTI_MARE_PATH.exists(),
+    reason="Real source file not present (data/processed/antipasti-di-mare.md)",
+)
+def test_parse_antipasti_di_mare_metadata_fields_populated():
+    """Recipes in antipasti-di-mare.md expose prep_time / cook_time / difficulty."""
+    recipes = parse_preparazioni_md(ANTIPASTI_MARE_PATH)
+    by_title = {r["title"]: r for r in recipes}
+
+    acciughe = by_title.get("Acciughe Al Verde")
+    assert acciughe is not None, "Expected recipe 'Acciughe Al Verde' not found"
+    assert acciughe.get("prep_time"), "prep_time missing for Acciughe Al Verde"
+    assert acciughe.get("cook_time") is not None, "cook_time missing"
+    assert acciughe.get("difficulty"), "difficulty missing"
+    assert acciughe.get("servings") == "4"
+
+
+@pytest.mark.skipif(
+    not ANTIPASTI_MARE_PATH.exists(),
+    reason="Real source file not present (data/processed/antipasti-di-mare.md)",
+)
+def test_parse_antipasti_di_mare_no_metadata_titles():
+    """None of the parsed recipes should have a title derived from a metadata line."""
+    recipes = parse_preparazioni_md(ANTIPASTI_MARE_PATH)
+    titles = [r["title"] for r in recipes]
+
+    forbidden_fragments = ("Difficolt", "Preparazione", "Cottura")
+    spurious = [t for t in titles if any(f in t for f in forbidden_fragments)]
+    assert not spurious, f"Metadata lines mistakenly parsed as recipe titles: {spurious}"
 
 
 # ---------------------------------------------------------------------------
@@ -323,3 +507,105 @@ def test_round_trip_parse_then_export(tmp_path: Path):
     files = list(tmp_path.glob("*.md"))
     assert len(files) == 18
     assert (tmp_path / "besciamella.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# export_recipes_to_json
+# ---------------------------------------------------------------------------
+
+_SAMPLE_RECIPES = [
+    {
+        "title": "Besciamella",
+        "ingredients": ["40 G DI BURRO", "50 G DI FARINA"],
+        "instructions": ["Fate fondere il burro."],
+        "pages": [16],
+        "raw_text": "BESCIAMELLA\nINGREDIENTI\n40 G DI BURRO",
+    },
+    {
+        "title": "Ragù",
+        "ingredients": ["400 G DI MANZO"],
+        "instructions": ["Cuocete per 2 ore."],
+        "pages": [22],
+        "raw_text": "RAGU\nINGREDIENTI\n400 G DI MANZO",
+    },
+]
+
+
+def test_json_export_creates_files(tmp_path: Path):
+    """Each recipe produces one .json file."""
+    export_recipes_to_json(_SAMPLE_RECIPES, output_dir=tmp_path)
+
+    assert (tmp_path / "besciamella.json").exists()
+    assert (tmp_path / "ragu.json").exists()
+
+
+def test_json_export_valid_json(tmp_path: Path):
+    """Each written file is valid JSON containing the expected title."""
+    export_recipes_to_json(_SAMPLE_RECIPES, output_dir=tmp_path)
+
+    data = json.loads((tmp_path / "besciamella.json").read_text(encoding="utf-8"))
+    assert data["title"] == "Besciamella"
+    assert data["ingredients"] == ["40 G DI BURRO", "50 G DI FARINA"]
+    assert data["pages"] == [16]
+
+
+def test_json_export_include_raw_text_true(tmp_path: Path):
+    """raw_text is present when include_raw_text=True (default)."""
+    export_recipes_to_json(_SAMPLE_RECIPES, output_dir=tmp_path, include_raw_text=True)
+
+    data = json.loads((tmp_path / "besciamella.json").read_text(encoding="utf-8"))
+    assert "raw_text" in data
+
+
+def test_json_export_include_raw_text_false(tmp_path: Path):
+    """raw_text is omitted when include_raw_text=False."""
+    export_recipes_to_json(_SAMPLE_RECIPES, output_dir=tmp_path, include_raw_text=False)
+
+    data = json.loads((tmp_path / "besciamella.json").read_text(encoding="utf-8"))
+    assert "raw_text" not in data
+
+
+def test_json_export_duplicate_titles_deduplicated(tmp_path: Path):
+    """Two recipes with the same slug get _1 suffix on the second."""
+    dupes = [
+        {"title": "Same", "ingredients": ["A"], "instructions": ["Step 1."]},
+        {"title": "Same", "ingredients": ["B"], "instructions": ["Step 2."]},
+    ]
+    export_recipes_to_json(dupes, output_dir=tmp_path)
+
+    files = sorted(f.name for f in tmp_path.glob("same*.json"))
+    assert files == ["same.json", "same_1.json"]
+
+    first = json.loads((tmp_path / "same.json").read_text(encoding="utf-8"))
+    second = json.loads((tmp_path / "same_1.json").read_text(encoding="utf-8"))
+    assert first["ingredients"] == ["A"]
+    assert second["ingredients"] == ["B"]
+
+
+def test_json_export_empty_list_is_noop(tmp_path: Path):
+    """Empty list writes nothing and does not raise."""
+    export_recipes_to_json([], output_dir=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_json_export_wrong_type_raises():
+    """Non-list input raises ValueError."""
+    with pytest.raises(ValueError):
+        export_recipes_to_json("not a list")  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(
+    not PREPARAZIONI_PATH.exists(),
+    reason="Real source file not present",
+)
+def test_json_round_trip_parse_then_export(tmp_path: Path):
+    """Full pipeline: parse real file → JSON export → 18 valid files."""
+    recipes = parse_preparazioni_md(PREPARAZIONI_PATH)
+    export_recipes_to_json(recipes, output_dir=tmp_path, include_raw_text=False)
+
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 18
+
+    data = json.loads((tmp_path / "besciamella.json").read_text(encoding="utf-8"))
+    assert data["title"] == "Besciamella"
+    assert "raw_text" not in data

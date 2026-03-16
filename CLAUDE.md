@@ -39,7 +39,7 @@ fitz.open(pdf_path)
   └─ parse_preparazioni_md()
         ├─ reads frontmatter titolo: field
         ├─ extracts ```text ... ``` block
-        └─ 6-step line state machine (see invariants below)
+        └─ 7-step line state machine (see invariants below)
               └─ List[Dict]
                     └─ export_recipes_to_markdown()
                           ├─ sanitize_filename()  — per recipe
@@ -54,13 +54,14 @@ fitz.open(pdf_path)
 ## Key invariants — extractor state machine
 
 The line tokeniser in `parse_preparazioni_md` processes lines in this priority
-order. **The order is load-bearing — do not reorder steps 4 and 5.**
+order. **The order is load-bearing — do not reorder steps 3.5, 4, and 5.**
 
 | Step | Condition | Action |
 |---|---|---|
 | 1 | `--- pagina N ---` | Update `current_page`; no content |
 | 2 | Blank line | Flush pending instruction buffer |
-| 3 | `INGREDIENTI` keyword | Set `in_ingredients = True` |
+| 3 | `^INGREDIENTI\b` (bare or `PER N PERSONE`) | Set `in_ingredients = True`; extract `servings` |
+| 3.5 | `^(PREPARAZIONE\|COTTURA\|DIFFICOLT[AÀ])\s*:` | Extract `prep_time` / `cook_time` / `difficulty`; skip line |
 | 4 | `in_ingredients=True` (**before title check**) | ALL-CAPS → ingredient; mixed-case → start instructions |
 | 5 | `_is_recipe_title()` passes | Close current recipe, open new one |
 | 6 | Anything else | Append to instruction buffer |
@@ -70,13 +71,19 @@ order. **The order is load-bearing — do not reorder steps 4 and 5.**
 `_is_recipe_title()` would match them (ALL-CAPS, no units) and falsely start a
 new recipe. Checking `in_ingredients` first prevents this.
 
+**Why step 3.5 must precede step 4:** metadata lines like `DIFFICOLTÀ: *` are
+ALL-CAPS with no digits or units, so `_is_recipe_title()` would match them
+and open a spurious recipe. The `":"` guard in `_is_recipe_title` is the primary
+defence, but step 3.5 also ensures these lines are never seen by step 4.
+
 **`_is_recipe_title` heuristic — a line is a recipe title iff:**
 1. Non-empty after strip
 2. Not equal to `INGREDIENTI` or the document's `titolo:` field
 3. Not a `--- pagina N ---` marker
-4. Fully uppercase (`stripped == stripped.upper()`)
-5. Does not contain a digit or measurement token (`G`, `DL`, `KG`, `ML`, `CL`, `CUCCHIAI`, `CUCCHIAINO`, `RAMETTO`, `GRANO`, `GRANI`, `PRESA`)
-6. Does not end with `,`
+4. Does not contain `:` (rules out all `KEY: VALUE` metadata lines)
+5. Fully uppercase (`stripped == stripped.upper()`)
+6. Does not contain a digit or measurement token (`G`, `DL`, `KG`, `ML`, `CL`, `CUCCHIAI`, `CUCCHIAINO`, `RAMETTO`, `GRANO`, `GRANI`, `PRESA`)
+7. Does not end with `,`
 
 ## Recipe dict schema
 
@@ -148,13 +155,14 @@ callers can override with `force=True`. `parser.py` does the same.
 venv/Scripts/python.exe -m pytest tests/ -v
 ```
 
-21 tests covering `sanitize_filename`, `parse_preparazioni_md` (unit +
-integration against real file), `export_recipes_to_markdown` (round-trip,
-dedup, type guard, empty input), and `__version__`.
+37 tests covering `sanitize_filename`, `parse_preparazioni_md` (unit +
+integration against real files), `export_recipes_to_markdown` (round-trip,
+dedup, type guard, empty input), `export_recipes_to_json`, and `__version__`.
 
-The real-file integration tests (`test_parse_real_file_*`,
-`test_round_trip_parse_then_export`) are skipped automatically when
-`data/processed/preparazioni-di-base.md` is absent.
+The real-file integration tests are skipped automatically when the
+corresponding source file in `data/processed/` is absent:
+- `test_parse_real_file_*`, `test_round_trip_parse_then_export` → `preparazioni-di-base.md`
+- `test_parse_antipasti_di_mare_*` → `antipasti-di-mare.md`
 
 ## User guide
 

@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 from typing import List, Dict, Any
@@ -19,6 +20,45 @@ _UNIT_TOKENS = re.compile(
 _PAGE_MARKER = re.compile(r"^---\s*pagina\s*(\d+)\s*---\s*$", re.IGNORECASE)
 _RAW_TEXT_BLOCK = re.compile(r"```text\n(.*?)```", re.DOTALL)
 
+# Matches "INGREDIENTI" and "INGREDIENTI PER 4 PERSONE" variants.
+_INGREDIENTI_HEADER = re.compile(r"^INGREDIENTI\b")
+# Extracts the servings count from "INGREDIENTI PER 4 PERSONE".
+_SERVINGS_PATTERN = re.compile(r"\bPER\s+(\d+)\s+PERSON[EAI]\b", re.IGNORECASE)
+
+# Matches lines that carry recipe metadata (prep/cook time, difficulty).
+# These appear between the recipe title and the INGREDIENTI line.
+_METADATA_LINE = re.compile(r"^(PREPARAZIONE|COTTURA|DIFFICOLT[AÀ])\s*:", re.IGNORECASE)
+
+
+def _extract_metadata(line: str, recipe: dict) -> None:
+    """Parse a metadata line and write prep_time / cook_time / difficulty into *recipe*.
+
+    Handles single-key and multi-key formats on the same line:
+    - ``"PREPARAZIONE: 20 MINUTI, COTTURA: NO, DIFFICOLTÀ: *"``
+    - ``"PREPARAZIONE: 45 MINUTI, COTTURA: 20 MINUTI DIFFICOLTÀ: **"``
+    - ``"DIFFICOLTÀ: *"``
+
+    Uses ``setdefault`` so the first value found wins (handles split lines where
+    PREPARAZIONE appears on a previous line before COTTURA/DIFFICOLTÀ).
+    """
+    m = re.search(
+        r"PREPARAZIONE\s*:\s*(.+?)(?=\s*,?\s*(?:COTTURA|DIFFICOLT[AÀ])\s*:|$)",
+        line, re.IGNORECASE,
+    )
+    if m:
+        recipe.setdefault("prep_time", m.group(1).strip().rstrip(",").strip())
+
+    m = re.search(
+        r"COTTURA\s*:\s*(.+?)(?=\s*,?\s*DIFFICOLT[AÀ]\s*:|$)",
+        line, re.IGNORECASE,
+    )
+    if m:
+        recipe.setdefault("cook_time", m.group(1).strip().rstrip(",").strip())
+
+    m = re.search(r"DIFFICOLT[AÀ]\s*:\s*(.+?)$", line, re.IGNORECASE)
+    if m:
+        recipe.setdefault("difficulty", m.group(1).strip())
+
 
 def _is_recipe_title(line: str, doc_title: str) -> bool:
     """
@@ -38,6 +78,8 @@ def _is_recipe_title(line: str, doc_title: str) -> bool:
     if stripped in {"INGREDIENTI", doc_title.upper()}:
         return False
     if _PAGE_MARKER.match(stripped):
+        return False
+    if ":" in stripped:                # KEY: VALUE lines (metadata) are never titles
         return False
     if stripped != stripped.upper():   # mixed-case → instructions
         return False
@@ -131,11 +173,25 @@ def parse_preparazioni_md(filepath: str | Path) -> List[Dict[str, Any]]:
             _flush_instruction_paragraph()
             continue
 
-        # 3. INGREDIENTI keyword — enter ingredient collection mode
-        if stripped == "INGREDIENTI":
+        # 3. INGREDIENTI header — enter ingredient collection mode.
+        #    Matches bare "INGREDIENTI" and "INGREDIENTI PER 4 PERSONE" variants.
+        if _INGREDIENTI_HEADER.match(stripped):
             in_ingredients = True
             if current:
                 current["raw_text"] += f"\n{stripped}"
+                m = _SERVINGS_PATTERN.search(stripped)
+                if m:
+                    current.setdefault("servings", m.group(1))
+            continue
+
+        # 3.5. Metadata line (PREPARAZIONE / COTTURA / DIFFICOLTÀ).
+        #      These lines appear between the recipe title and INGREDIENTI in
+        #      most files.  Extract structured fields and skip the raw text from
+        #      ingredients/instructions.
+        if _METADATA_LINE.match(stripped):
+            if current is not None:
+                current["raw_text"] += f"\n{stripped}"
+                _extract_metadata(stripped, current)
             continue
 
         # 4. Ingredient-mode content:
@@ -293,6 +349,71 @@ def export_recipes_to_markdown(
         # --- Writing (Atomic-like) ---
         try:
             filepath.write_text("\n".join(content_lines), encoding="utf-8")
+            logger.info(f"Successo: {filepath.name}")
+        except Exception as e:
+            logger.error(f"Errore critico durante la scrittura di {filepath}: {e}")
+
+
+def export_recipes_to_json(
+    recipes: List[Dict[str, Any]],
+    output_dir: str | Path = "data/recipes",
+    include_raw_text: bool = True,
+) -> None:
+    """
+    Write one JSON file per recipe into *output_dir*.
+
+    Each file is named after the recipe slug (via :func:`sanitize_filename`)
+    with a ``.json`` extension.  Duplicate slugs receive ``_1``, ``_2``, …
+    suffixes — identical logic to :func:`export_recipes_to_markdown`.
+
+    **Args:**
+    - ``recipes`` — list of recipe dicts (output of :func:`parse_preparazioni_md`
+      or any compatible source).
+    - ``output_dir`` — destination directory; created if absent.
+    - ``include_raw_text`` — when ``False``, the ``raw_text`` key is omitted
+      from every written dict (keeps files small).
+
+    **Raises:**
+    - ``ValueError`` if *recipes* is not a list.
+    - ``OSError`` if *output_dir* exists as a regular file.
+
+    **Invariant:** the JSON written is a single object (not an array), encoded
+    UTF-8, indented with 2 spaces.  The field order matches insertion order of
+    the source dict, with ``raw_text`` always last when present.
+    """
+    if not isinstance(recipes, list):
+        raise ValueError(f"Expected list of recipes, got {type(recipes)}")
+
+    if not recipes:
+        logger.warning("No recipes provided to export.")
+        return
+
+    out_dir = Path(output_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        raise OSError(
+            f"Cannot create directory '{out_dir}' because a file with that name exists."
+        )
+
+    for idx, recipe in enumerate(recipes):
+        title = recipe.get("title", "").strip() or f"Ricetta_{idx + 1}"
+
+        filepath = out_dir / (sanitize_filename(title) + ".json")
+        counter = 1
+        original_stem = filepath.stem
+        while filepath.exists():
+            filepath = out_dir / f"{original_stem}_{counter}.json"
+            counter += 1
+
+        # Optionally strip raw_text to keep files lean
+        payload = {k: v for k, v in recipe.items() if include_raw_text or k != "raw_text"}
+
+        try:
+            filepath.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             logger.info(f"Successo: {filepath.name}")
         except Exception as e:
             logger.error(f"Errore critico durante la scrittura di {filepath}: {e}")
