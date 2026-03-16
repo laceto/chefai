@@ -20,6 +20,13 @@ _UNIT_TOKENS = re.compile(
 _PAGE_MARKER = re.compile(r"^---\s*pagina\s*(\d+)\s*---\s*$", re.IGNORECASE)
 _RAW_TEXT_BLOCK = re.compile(r"```text\n(.*?)```", re.DOTALL)
 
+# Splits a comma-separated ingredient line at boundaries where the next token
+# is a digit or a known unit word.  Keeps single-ingredient lines intact.
+# IMPORTANT: the unit token list here must stay in sync with _UNIT_TOKENS above.
+_INGREDIENT_SPLIT_BOUNDARY = re.compile(
+    r",\s+(?=\d|(?:G|DL|ML|CL|KG|CUCCHIAI[O]?|CUCCHIAINO|RAMETT[OI]|GRANO|GRANI|PRESA)\b)"
+)
+
 # Matches "INGREDIENTI" and "INGREDIENTI PER 4 PERSONE" variants.
 _INGREDIENTI_HEADER = re.compile(r"^INGREDIENTI\b")
 # Extracts the servings count from "INGREDIENTI PER 4 PERSONE".
@@ -58,6 +65,29 @@ def _extract_metadata(line: str, recipe: dict) -> None:
     m = re.search(r"DIFFICOLT[AÀ]\s*:\s*(.+?)$", line, re.IGNORECASE)
     if m:
         recipe.setdefault("difficulty", m.group(1).strip())
+
+
+def _split_ingredient_line(line: str) -> list[str]:
+    """Split a raw ALL-CAPS ingredient line into one or more ingredient strings.
+
+    A split occurs at every comma that is immediately followed by a digit or a
+    known unit token (e.g. ``", 1 TUORLO"`` or ``", 50 G DI PREZZEMOLO"``).
+    Lines where no such boundary exists are returned as a one-element list,
+    preserving the existing single-ingredient-per-line behaviour of
+    *preparazioni-di-base.md*.
+
+    Each returned segment has its trailing comma and surrounding whitespace
+    stripped.
+
+    Examples::
+
+        "20 ACCIUGHE, 1 TUORLO D'UOVO,"  →  ["20 ACCIUGHE", "1 TUORLO D'UOVO"]
+        "40 G DI BURRO,"                  →  ["40 G DI BURRO"]
+        "500 G DI ACCIUGHE, IL SUCCO"     →  ["500 G DI ACCIUGHE, IL SUCCO"]  # IL is not a unit
+        "SALE"                            →  ["SALE"]
+    """
+    segments = _INGREDIENT_SPLIT_BOUNDARY.split(line)
+    return [s.strip().rstrip(",").strip() for s in segments if s.strip().rstrip(",").strip()]
 
 
 def _is_recipe_title(line: str, doc_title: str) -> bool:
@@ -204,7 +234,7 @@ def parse_preparazioni_md(filepath: str | Path) -> List[Dict[str, Any]]:
             current["raw_text"] += f"\n{stripped}"
             if stripped == stripped.upper():
                 # Still ALL-CAPS → another ingredient (strip trailing comma)
-                current["ingredients"].append(stripped.rstrip(","))
+                current["ingredients"].extend(_split_ingredient_line(stripped))
             else:
                 # First mixed-case line → transition to instructions
                 in_ingredients = False
@@ -417,3 +447,63 @@ def export_recipes_to_json(
             logger.info(f"Successo: {filepath.name}")
         except Exception as e:
             logger.error(f"Errore critico durante la scrittura di {filepath}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Single-file corpus export
+# ---------------------------------------------------------------------------
+
+
+def export_corpus_to_json(
+    recipes: List[Dict[str, Any]],
+    output_path: str | Path,
+    include_raw_text: bool = True,
+) -> None:
+    """Write all recipes as a single JSON array to *output_path*.
+
+    Unlike :func:`export_recipes_to_json` (one file per recipe), this writes
+    the entire list in one atomic operation — suitable for building a corpus
+    file from multiple parsed section files.
+
+    **Args:**
+    - ``recipes`` — list of recipe dicts (output of :func:`parse_preparazioni_md`
+      or any compatible source, e.g. from :mod:`scripts.build_corpus`).
+    - ``output_path`` — destination file path; parent directories are created
+      if absent.  An existing file is overwritten atomically (write to a
+      ``.tmp`` sibling, then rename).
+    - ``include_raw_text`` — when ``False``, the ``raw_text`` key is omitted
+      from every dict in the output.
+
+    **Raises:**
+    - ``ValueError`` if *recipes* is not a list.
+    - ``OSError`` if *output_path* is an existing directory.
+
+    **Invariant:** the JSON written is an array, encoded UTF-8, indented with
+    2 spaces.  Field order matches insertion order of each source dict.
+    """
+    if not isinstance(recipes, list):
+        raise ValueError(f"Expected list of recipes, got {type(recipes)}")
+
+    out = Path(output_path)
+    if out.is_dir():
+        raise OSError(f"Cannot write to '{out}': it is a directory.")
+
+    if not recipes:
+        logger.warning("No recipes provided to export_corpus_to_json — nothing written.")
+        return
+
+    payload = [
+        {k: v for k, v in r.items() if include_raw_text or k != "raw_text"}
+        for r in recipes
+    ]
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(out)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    logger.info("Corpus of %d recipes written to %s", len(recipes), out)

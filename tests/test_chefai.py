@@ -15,6 +15,8 @@ import pytest
 
 import chefai
 from chefai.extractor import (
+    _split_ingredient_line,
+    export_corpus_to_json,
     export_recipes_to_json,
     export_recipes_to_markdown,
     parse_preparazioni_md,
@@ -79,6 +81,44 @@ def test_sanitize_truncation():
     result = sanitize_filename("a" * 100, max_length=80)
     assert len(result) <= 80
     assert not result.endswith("-")
+
+
+# ---------------------------------------------------------------------------
+# _split_ingredient_line
+# ---------------------------------------------------------------------------
+
+
+def test_split_single_ingredient_trailing_comma():
+    """A single ingredient with a trailing comma returns one clean entry."""
+    assert _split_ingredient_line("40 G DI BURRO CHIARIFICATO,") == ["40 G DI BURRO CHIARIFICATO"]
+
+
+def test_split_digit_after_comma():
+    """A comma followed by a digit signals a new ingredient segment."""
+    result = _split_ingredient_line("20 ACCIUGHE SOTTO SALE, 1 TUORLO D'UOVO SODO,")
+    assert result == ["20 ACCIUGHE SOTTO SALE", "1 TUORLO D'UOVO SODO"]
+
+
+def test_split_unit_after_comma():
+    """A comma followed by a unit token (G, DL, …) splits the line."""
+    result = _split_ingredient_line("10 G DI BASILICO, 50 G DI PREZZEMOLO, 2 SPICCHI DI AGLIO,")
+    assert result == ["10 G DI BASILICO", "50 G DI PREZZEMOLO", "2 SPICCHI DI AGLIO"]
+
+
+def test_split_no_comma():
+    """A line with no comma is returned as a single-element list."""
+    assert _split_ingredient_line("SALE") == ["SALE"]
+
+
+def test_split_non_unit_after_comma_no_split():
+    """A comma followed by a non-unit word (IL, UN, …) does NOT split."""
+    result = _split_ingredient_line("500 G DI ACCIUGHE, IL SUCCO DI 2 LIMONI,")
+    assert result == ["500 G DI ACCIUGHE, IL SUCCO DI 2 LIMONI"]
+
+
+def test_split_trailing_comma_only():
+    """A line with a trailing comma but no separating quantity stays whole."""
+    assert _split_ingredient_line("250 G DI BURRO,") == ["250 G DI BURRO"]
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +484,34 @@ def test_parse_antipasti_di_mare_no_metadata_titles():
     assert not spurious, f"Metadata lines mistakenly parsed as recipe titles: {spurious}"
 
 
+@pytest.mark.skipif(
+    not ANTIPASTI_MARE_PATH.exists(),
+    reason="Real source file not present (data/processed/antipasti-di-mare.md)",
+)
+def test_parse_antipasti_di_mare_multi_ingredient_lines_split():
+    """Multi-ingredient lines (comma + quantity token) are split into separate entries."""
+    recipes = parse_preparazioni_md(ANTIPASTI_MARE_PATH)
+    by_title = {r["title"]: r for r in recipes}
+
+    acciughe = by_title.get("Acciughe Al Verde")
+    assert acciughe is not None, "Expected recipe 'Acciughe Al Verde' not found"
+
+    ings = acciughe["ingredients"]
+    # "20 ACCIUGHE SOTTO SALE, 1 TUORLO D'UOVO SODO," → two entries
+    assert "20 ACCIUGHE SOTTO SALE" in ings, f"Missing in: {ings}"
+    # Note: the source file uses a curly apostrophe (U+2019) in "D'UOVO"
+    assert any("TUORLO" in i for i in ings), f"No TUORLO entry found in: {ings}"
+    # "10 G DI BASILICO, 50 G DI PREZZEMOLO, 2 SPICCHI DI AGLIO," → three entries
+    assert "10 G DI BASILICO" in ings, f"Missing in: {ings}"
+    assert "50 G DI PREZZEMOLO" in ings, f"Missing in: {ings}"
+    assert "2 SPICCHI DI AGLIO" in ings, f"Missing in: {ings}"
+    # "1 DL DI OLIO EXTRAVERGINE DI OLIVA" (no comma-quantity boundary) → one entry
+    assert "1 DL DI OLIO EXTRAVERGINE DI OLIVA" in ings, f"Missing in: {ings}"
+    # No bundled multi-ingredient entries (no remaining internal commas with digits)
+    bundled = [i for i in ings if ", " in i and any(c.isdigit() for c in i.split(", ", 1)[1][:3])]
+    assert not bundled, f"Un-split multi-ingredient entries found: {bundled}"
+
+
 # ---------------------------------------------------------------------------
 # export_recipes_to_markdown
 # ---------------------------------------------------------------------------
@@ -609,3 +677,140 @@ def test_json_round_trip_parse_then_export(tmp_path: Path):
     data = json.loads((tmp_path / "besciamella.json").read_text(encoding="utf-8"))
     assert data["title"] == "Besciamella"
     assert "raw_text" not in data
+
+
+# ---------------------------------------------------------------------------
+# export_corpus_to_json
+# ---------------------------------------------------------------------------
+
+_CORPUS_RECIPES = [
+    {
+        "title": "Besciamella",
+        "ingredients": ["40 G DI BURRO"],
+        "instructions": ["Fate fondere."],
+        "raw_text": "BESCIAMELLA\nINGREDIENTI",
+    },
+    {
+        "title": "Ragù",
+        "ingredients": ["400 G DI MANZO"],
+        "instructions": ["Cuocete."],
+        "raw_text": "RAGU\nINGREDIENTI",
+    },
+]
+
+
+def test_corpus_export_creates_single_file(tmp_path: Path):
+    """All recipes are written to one JSON file as an array."""
+    out = tmp_path / "recipes.json"
+    export_corpus_to_json(_CORPUS_RECIPES, out)
+
+    assert out.exists()
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert isinstance(data, list)
+    assert len(data) == 2
+    assert data[0]["title"] == "Besciamella"
+    assert data[1]["title"] == "Ragù"
+
+
+def test_corpus_export_include_raw_text_true(tmp_path: Path):
+    """raw_text is present in output when include_raw_text=True (default)."""
+    out = tmp_path / "recipes.json"
+    export_corpus_to_json(_CORPUS_RECIPES, out, include_raw_text=True)
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert "raw_text" in data[0]
+
+
+def test_corpus_export_include_raw_text_false(tmp_path: Path):
+    """raw_text is omitted from every entry when include_raw_text=False."""
+    out = tmp_path / "recipes.json"
+    export_corpus_to_json(_CORPUS_RECIPES, out, include_raw_text=False)
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert all("raw_text" not in r for r in data)
+
+
+def test_corpus_export_wrong_type_raises():
+    """Non-list input raises ValueError immediately."""
+    with pytest.raises(ValueError):
+        export_corpus_to_json("not a list", Path("anywhere.json"))  # type: ignore[arg-type]
+
+
+def test_corpus_export_output_is_directory_raises(tmp_path: Path):
+    """Passing an existing directory as output_path raises OSError."""
+    with pytest.raises(OSError):
+        export_corpus_to_json(_CORPUS_RECIPES, tmp_path)
+
+
+def test_corpus_export_empty_list_is_noop(tmp_path: Path):
+    """Empty list writes nothing and does not raise."""
+    out = tmp_path / "recipes.json"
+    export_corpus_to_json([], out)
+    assert not out.exists()
+
+
+def test_corpus_export_overwrites_existing(tmp_path: Path):
+    """A second call replaces the previous output file."""
+    out = tmp_path / "recipes.json"
+    export_corpus_to_json([{"title": "A", "ingredients": [], "instructions": []}], out)
+    export_corpus_to_json([{"title": "B", "ingredients": [], "instructions": []}], out)
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert len(data) == 1
+    assert data[0]["title"] == "B"
+
+
+def test_corpus_export_no_tmp_file_left_behind(tmp_path: Path):
+    """No .tmp file remains after a successful write."""
+    out = tmp_path / "recipes.json"
+    export_corpus_to_json(_CORPUS_RECIPES, out)
+
+    assert not (tmp_path / "recipes.json.tmp").exists()
+
+
+def test_corpus_export_creates_parent_dirs(tmp_path: Path):
+    """Parent directories are created automatically if absent."""
+    out = tmp_path / "nested" / "dir" / "recipes.json"
+    export_corpus_to_json(_CORPUS_RECIPES, out)
+    assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# scripts.build_corpus — integration test against real data/processed/
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not Path("data/processed").exists(),
+    reason="data/processed/ not present",
+)
+def test_build_corpus_produces_valid_json(tmp_path: Path):
+    """build_corpus() parses all section files and writes a valid corpus JSON."""
+    from scripts.build_corpus import build_corpus
+
+    out = tmp_path / "recipes.json"
+    recipes = build_corpus(
+        processed_dir=Path("data/processed"),
+        output_path=out,
+        include_raw_text=False,
+    )
+
+    assert out.exists(), "Corpus file was not created"
+    data = json.loads(out.read_text(encoding="utf-8"))
+
+    assert isinstance(data, list)
+    assert len(data) == len(recipes), "File count does not match returned list"
+    assert len(data) > 0, "No recipes in corpus"
+
+    # Every recipe must carry a source_file stamp
+    missing_source = [r.get("title") for r in data if "source_file" not in r]
+    assert not missing_source, f"source_file missing on: {missing_source}"
+
+    # source_file values must match real file stems
+    valid_stems = {p.stem for p in Path("data/processed").glob("*.md")}
+    bad_sources = [r["source_file"] for r in data if r["source_file"] not in valid_stems]
+    assert not bad_sources, f"Unknown source_file values: {set(bad_sources)}"
+
+    # raw_text must be absent when include_raw_text=False
+    with_raw = [r.get("title") for r in data if "raw_text" in r]
+    assert not with_raw, f"raw_text present despite include_raw_text=False: {with_raw}"

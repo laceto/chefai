@@ -6,8 +6,11 @@ Two independent pipelines:
 
 ```
 PDF ──► chefai.parser ──► ricette.json
-                                │
-preprocessed .md ──► chefai.extractor ──► recipes_md/*.md
+
+preprocessed .md ──► chefai.extractor ──► per-recipe .md files
+                              │
+                              ▼
+                    scripts/build_corpus.py ──► data/recipes.json
 ```
 
 ## Installation
@@ -41,57 +44,81 @@ extract_recipes_from_pdf("libro.pdf", output_json="ricette.json")
 # writes ricette.json with a list of recipe dicts
 ```
 
-The JSON list contains one dict per recipe:
-
-```json
-{
-  "title": "Besciamella",
-  "prep_time": "10 min",
-  "cook_time": "15 min",
-  "difficulty": "Facile",
-  "servings": null,
-  "ingredients": ["40 g burro", "50 g farina", "5 dl latte"],
-  "instructions": ["Fate fondere il burro...", "Unite il latte..."],
-  "pages": [16],
-  "raw_text": "...",
-  "confidence": 1.0
-}
-```
-
 `confidence` is a float in `[0, 1]` that falls below `1.0` when structural
 signals are weak (missing ingredients, fewer than two instruction steps).
 
-### Pipeline 2 — Preprocessed markdown to per-recipe files (`chefai.extractor`)
+### Pipeline 2 — Preprocessed markdown (`chefai.extractor`)
 
-Parse a preprocessed cookbook section and write one `.md` file per recipe:
+#### Parse a single section file
 
 ```python
 from chefai.extractor import parse_preparazioni_md, export_recipes_to_markdown
 
-recipes = parse_preparazioni_md("data/processed/preparazioni-di-base.md")
+recipes = parse_preparazioni_md("data/processed/antipasti-di-mare.md")
 export_recipes_to_markdown(recipes, output_dir="recipes_md")
 ```
 
-Each output file contains YAML front-matter plus `## Ingredienti` and
-`## Procedimento` sections:
+Works with all 11 section files in `data/processed/`. Each output file
+contains YAML front-matter plus `## Ingredienti` and `## Procedimento` sections.
 
-```markdown
----
-title: "Besciamella"
-pages: [16]
----
+#### Build the full corpus (all section files → one JSON)
 
-# Besciamella
+```bash
+python scripts/build_corpus.py
+# writes data/recipes.json  (atomic write; overwrites on rerun)
 
-## Ingredienti
-- 40 G DI BURRO CHIARIFICATO
-- 50 G DI FARINA
-- 5 DL DI LATTE
-- SALE
-
-## Procedimento
-1. Fate fondere il burro e unite la farina...
+python scripts/build_corpus.py --no-raw-text   # smaller file
+python scripts/build_corpus.py --output data/my_corpus.json
 ```
+
+Or from Python:
+
+```python
+from scripts.build_corpus import build_corpus
+from pathlib import Path
+
+recipes = build_corpus(
+    processed_dir=Path("data/processed"),
+    output_path=Path("data/recipes.json"),
+    include_raw_text=False,
+)
+print(len(recipes), "recipes written")
+```
+
+Every recipe in the corpus carries a `source_file` field (e.g.
+`"antipasti-di-mare"`) so its origin is traceable.
+
+#### Export a list of recipes to JSON (per-file or single-file)
+
+```python
+from chefai.extractor import export_recipes_to_json, export_corpus_to_json
+
+# One .json file per recipe (legacy; useful for per-recipe inspection)
+export_recipes_to_json(recipes, output_dir="data/recipes")
+
+# One combined array file (preferred for downstream consumers)
+export_corpus_to_json(recipes, output_path="data/recipes.json")
+```
+
+### Recipe dict schema
+
+All pipelines produce dicts with these keys (all optional except `title`):
+
+| Key | Type | Notes |
+|---|---|---|
+| `title` | `str` | Title-cased, e.g. `"Brodo Di Carne"` |
+| `ingredients` | `List[str]` | One entry per ingredient; multi-ingredient lines are split |
+| `instructions` | `List[str]` | One entry per blank-line-separated paragraph |
+| `pages` | `List[int]` | Source page numbers |
+| `raw_text` | `str` | Original lines from the source text block |
+| `prep_time` | `str` | e.g. `"20 MINUTI"` — from `PREPARAZIONE:` metadata line |
+| `cook_time` | `str` | e.g. `"NO"` or `"30 MINUTI"` — from `COTTURA:` metadata line |
+| `difficulty` | `str` | e.g. `"*"` or `"**"` — from `DIFFICOLTÀ:` metadata line |
+| `servings` | `str` | e.g. `"4"` — from `INGREDIENTI PER 4 PERSONE` header |
+| `confidence` | `float` | `0.0–1.0`; only set by `chefai.parser` |
+| `source_file` | `str` | Source file stem — set by `scripts/build_corpus.py` only |
+
+## API reference — `chefai.extractor`
 
 #### `parse_preparazioni_md(filepath)`
 
@@ -99,8 +126,9 @@ pages: [16]
 |---|---|---|
 | `filepath` | `str \| Path` | Path to a preprocessed section markdown file |
 
-Returns `List[Dict]` — each dict has keys `title`, `ingredients`, `instructions`,
-`pages`, `raw_text`.
+Returns `List[Dict]`. Handles both `INGREDIENTI` (bare) and
+`INGREDIENTI PER N PERSONE` variants. Parses `PREPARAZIONE:`,
+`COTTURA:`, and `DIFFICOLTÀ:` metadata lines into structured fields.
 
 Raises `FileNotFoundError` if the file does not exist; `ValueError` if no
 ` ```text ``` ` block is found inside it.
@@ -109,20 +137,31 @@ Raises `FileNotFoundError` if the file does not exist; `ValueError` if no
 
 | Arg | Type | Default | Description |
 |---|---|---|---|
-| `recipes` | `List[Dict]` | — | Output of `parse_preparazioni_md` (or any compatible list) |
+| `recipes` | `List[Dict]` | — | Output of `parse_preparazioni_md` or compatible list |
 | `output_dir` | `str \| Path` | `"recipes_md"` | Directory to write files into (created if absent) |
 | `include_raw_text` | `bool` | `True` | Append `## Testo originale` fenced block |
-| `include_pages` | `bool` | `True` | Write `pages:` field in YAML front-matter |
+| `include_pages` | `bool` | `True` | Write `pages:` in YAML front-matter |
 
 Raises `ValueError` if `recipes` is not a list; `OSError` if `output_dir`
-collides with an existing regular file. Duplicate slugs get `_1`, `_2`, ...
+collides with an existing regular file. Duplicate slugs get `_1`, `_2`, …
 suffixes.
+
+#### `export_recipes_to_json(recipes, output_dir, include_raw_text)`
+
+Writes one `.json` file per recipe into `output_dir`. Same deduplication
+and error behaviour as `export_recipes_to_markdown`.
+
+#### `export_corpus_to_json(recipes, output_path, include_raw_text)`
+
+Writes the entire list as a single JSON array to `output_path`. Uses an
+atomic write (`.tmp` + rename) so a failed run never leaves a corrupt file.
+Raises `OSError` if `output_path` is an existing directory.
 
 #### `sanitize_filename(title, max_length=80)`
 
-Converts a recipe title to a filesystem-safe slug (accent-stripped, lowercase,
-hyphen-separated). Returns the sentinel `"ricetta-senza-titolo"` for empty or
-symbol-only inputs.
+Converts a recipe title to a filesystem-safe slug (accent-stripped,
+lowercase, hyphen-separated). Returns `"ricetta-senza-titolo"` for empty
+or symbol-only inputs.
 
 ## Development
 
@@ -131,8 +170,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
-See [`extractor_guide.ipynb`](extractor_guide.ipynb) for runnable examples of
-the markdown pipeline.
+54 tests covering both pipelines and all export functions. See
+[`extractor_guide.ipynb`](extractor_guide.ipynb) for runnable examples.
 
 ## Project structure
 
@@ -142,10 +181,12 @@ chefai/
 │   ├── __init__.py          # __version__ = "0.1.0"
 │   ├── parser.py            # PDF pipeline (requires PyMuPDF)
 │   └── extractor.py         # Markdown pipeline
+├── scripts/
+│   └── build_corpus.py      # Batch-parse all section files → data/recipes.json
 ├── data/
 │   └── processed/           # Preprocessed cookbook section .md files (gitignored)
 ├── tests/
-│   └── test_chefai.py       # pytest suite (21 tests)
+│   └── test_chefai.py       # pytest suite (54 tests)
 ├── extractor_guide.ipynb    # User guide for chefai.extractor
 ├── pyproject.toml
 ├── requirements.txt

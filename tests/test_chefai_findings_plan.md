@@ -1,5 +1,11 @@
 # Code Review: test_chefai.py
 
+> **Status: RESOLVED** — All action plan items completed as of 2026-03-16.
+> The test suite now has 54 tests with full coverage of `parse_preparazioni_md`,
+> `export_recipes_to_markdown`, `export_recipes_to_json`, `export_corpus_to_json`,
+> `sanitize_filename`, and `_split_ingredient_line`. This document is kept as a
+> historical record of the original findings.
+
 **Review Date:** 2026-03-15
 **Reviewer:** Claude Code
 **File:** `tests/test_chefai.py`
@@ -205,20 +211,20 @@ def test_version():
 ## Action Plan
 
 ### Phase 1: Critical (Immediate)
-- [ ] Add `test_parse_preparazioni_md_happy_path` — verify recipe count, titles, ingredient lists, page tracking
-- [ ] Add `test_parse_bare_allcaps_ingredient` — regression test for the `SALE`-as-title bug
-- [ ] Add `test_parse_missing_file` and `test_parse_no_text_block`
+- [x] Add `test_parse_preparazioni_md_happy_path` — verify recipe count, titles, ingredient lists, page tracking
+- [x] Add `test_parse_bare_allcaps_ingredient` — regression test for the `SALE`-as-title bug
+- [x] Add `test_parse_missing_file` and `test_parse_no_text_block`
 
 ### Phase 2: High Priority (This sprint)
-- [ ] Add `test_sanitize_filename_*` edge cases (empty, truncation, accents)
-- [ ] Add `test_export_duplicate_titles`
+- [x] Add `test_sanitize_filename_*` edge cases (empty, truncation, accents)
+- [x] Add `test_export_duplicate_titles`
 
 ### Phase 3: Medium Priority (Next sprint)
-- [ ] Add full round-trip integration test against the real source file
-- [ ] Add `test_export_creates_valid_yaml_frontmatter`
+- [x] Add full round-trip integration test against the real source file
+- [x] Add `test_export_creates_valid_yaml_frontmatter`
 
 ### Phase 4: Low Priority (Backlog)
-- [ ] Add docstrings to all test functions
+- [x] Add docstrings to all test functions
 
 ## Technical Debt Estimate
 

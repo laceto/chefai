@@ -49,6 +49,8 @@ fitz.open(pdf_path)
 **Public API:**
 - `parse_preparazioni_md(filepath: str | Path) -> List[Dict[str, Any]]`
 - `export_recipes_to_markdown(recipes, output_dir, include_raw_text=True, include_pages=True) -> None`
+- `export_recipes_to_json(recipes, output_dir, include_raw_text=True) -> None`
+- `export_corpus_to_json(recipes, output_path, include_raw_text=True) -> None`
 - `sanitize_filename(title: str, max_length: int = 80) -> str`
 
 ## Key invariants — extractor state machine
@@ -85,6 +87,14 @@ defence, but step 3.5 also ensures these lines are never seen by step 4.
 6. Does not contain a digit or measurement token (`G`, `DL`, `KG`, `ML`, `CL`, `CUCCHIAI`, `CUCCHIAINO`, `RAMETTO`, `GRANO`, `GRANI`, `PRESA`)
 7. Does not end with `,`
 
+**Step 4 ingredient splitting:** ALL-CAPS ingredient lines are passed through
+`_split_ingredient_line(stripped)` before being added to the recipe. This
+function uses `_INGREDIENT_SPLIT_BOUNDARY` (a comma followed by a digit or
+known unit token) to detect multi-ingredient lines (e.g.
+`"20 ACCIUGHE, 1 TUORLO D'UOVO,"` → two entries). Single-ingredient lines
+are returned unchanged. **The unit token lists in `_UNIT_TOKENS` and
+`_INGREDIENT_SPLIT_BOUNDARY` must be kept in sync when adding new tokens.**
+
 ## Recipe dict schema
 
 Both pipelines produce dicts with these keys (all optional except `title`):
@@ -92,15 +102,16 @@ Both pipelines produce dicts with these keys (all optional except `title`):
 | Key | Type | Source |
 |---|---|---|
 | `title` | `str` | Recipe name, Title-cased |
-| `ingredients` | `List[str]` | One entry per ingredient line |
+| `ingredients` | `List[str]` | One entry per ingredient (lines split by `_split_ingredient_line`) |
 | `instructions` | `List[str]` | One entry per paragraph / sentence |
 | `pages` | `List[int]` | Page numbers the recipe spans |
 | `raw_text` | `str` | Original source text |
 | `confidence` | `float` | 0.0–1.0; only set by `chefai.parser` |
-| `prep_time` | `str` | e.g. `"10 min"` — optional |
-| `cook_time` | `str` | e.g. `"1 ora"` — optional |
-| `difficulty` | `str` | e.g. `"Facile"` — optional |
-| `servings` | `str \| None` | e.g. `"4"` — optional |
+| `prep_time` | `str` | e.g. `"30 MINUTI"` — optional; from metadata line |
+| `cook_time` | `str` | e.g. `"NO"` or `"20 MINUTI"` — optional; from metadata line |
+| `difficulty` | `str` | e.g. `"*"` or `"**"` — optional; from metadata line |
+| `servings` | `str` | e.g. `"4"` — optional; from `INGREDIENTI PER N PERSONE` |
+| `source_file` | `str` | Stem of source `.md` file — set by `scripts/build_corpus.py` only |
 
 ## Preprocessed markdown format
 
@@ -141,6 +152,30 @@ section heading from recipe detection, then parses the ` ```text ``` ` block.
 | `export_recipes_to_markdown` | `output_dir` is a regular file | `OSError` |
 | `export_recipes_to_markdown` | Empty list | `WARNING` log, no-op |
 | `export_recipes_to_markdown` | Duplicate slugs | appends `_1`, `_2`, … |
+| `export_recipes_to_json` | `recipes` not a list | `ValueError` |
+| `export_recipes_to_json` | `output_dir` is a regular file | `OSError` |
+| `export_recipes_to_json` | Empty list | `WARNING` log, no-op |
+| `export_recipes_to_json` | Duplicate slugs | appends `_1`, `_2`, … |
+| `export_corpus_to_json` | `recipes` not a list | `ValueError` |
+| `export_corpus_to_json` | `output_path` is a directory | `OSError` |
+| `export_corpus_to_json` | Empty list | `WARNING` log, no-op |
+
+## Corpus build script (`scripts/build_corpus.py`)
+
+Discovers all `*.md` files in `data/processed/`, parses each with
+`parse_preparazioni_md`, stamps a `source_file` field (path stem, e.g.
+`"antipasti-di-mare"`) on every recipe dict, and writes the combined list to
+`data/recipes.json` via `export_corpus_to_json` (atomic write).
+
+```bash
+# from project root with venv active
+python scripts/build_corpus.py
+python scripts/build_corpus.py --no-raw-text          # omit raw_text to reduce size
+python scripts/build_corpus.py --output data/out.json # custom destination
+```
+
+A single malformed source file is logged as an error and skipped; the rest of
+the corpus is still written.
 
 ## Logging
 
@@ -155,14 +190,17 @@ callers can override with `force=True`. `parser.py` does the same.
 venv/Scripts/python.exe -m pytest tests/ -v
 ```
 
-37 tests covering `sanitize_filename`, `parse_preparazioni_md` (unit +
-integration against real files), `export_recipes_to_markdown` (round-trip,
-dedup, type guard, empty input), `export_recipes_to_json`, and `__version__`.
+55 tests covering `sanitize_filename`, `_split_ingredient_line`,
+`parse_preparazioni_md` (unit + integration against real files),
+`export_recipes_to_markdown` (round-trip, dedup, type guard, empty input),
+`export_recipes_to_json`, `export_corpus_to_json`, `build_corpus`, and
+`__version__`.
 
-The real-file integration tests are skipped automatically when the
-corresponding source file in `data/processed/` is absent:
+Real-file integration tests are skipped automatically when the corresponding
+source file or directory is absent:
 - `test_parse_real_file_*`, `test_round_trip_parse_then_export` → `preparazioni-di-base.md`
 - `test_parse_antipasti_di_mare_*` → `antipasti-di-mare.md`
+- `test_build_corpus_produces_valid_json` → `data/processed/`
 
 ## User guide
 
