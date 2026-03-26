@@ -1,10 +1,11 @@
 # Code Review: test_chefai.py
 
 > **Status: RESOLVED** — All action plan items completed as of 2026-03-16.
-> The test suite now has 54 tests with full coverage of `parse_preparazioni_md`,
+> `tests/test_chefai.py` now has 54 tests with full coverage of `parse_preparazioni_md`,
 > `export_recipes_to_markdown`, `export_recipes_to_json`, `export_corpus_to_json`,
-> `sanitize_filename`, and `_split_ingredient_line`. This document is kept as a
-> historical record of the original findings.
+> `sanitize_filename`, and `_split_ingredient_line`. A second suite
+> `tests/test_feed_embedder.py` (20 tests) was added later for `chefai.feed_embedder`.
+> Total suite: 74 tests. This document is kept as a historical record of the original findings.
 
 **Review Date:** 2026-03-15
 **Reviewer:** Claude Code

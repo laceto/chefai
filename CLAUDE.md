@@ -6,12 +6,13 @@ Reference for AI assistants working on this codebase.
 
 ```
 chefai/
-├── __init__.py      __version__ = "0.1.0"
-├── parser.py        PDF pipeline — requires PyMuPDF (fitz) and tqdm
-└── extractor.py     Markdown pipeline — stdlib only
+├── __init__.py        __version__ = "0.1.0"
+├── parser.py          PDF pipeline — requires PyMuPDF (fitz) and tqdm
+├── extractor.py       Markdown pipeline — stdlib only
+└── feed_embedder.py   FAISS vectorstore helpers for RSS feed article embeddings
 ```
 
-## Two independent pipelines
+## Three independent pipelines
 
 ### PDF pipeline (`chefai.parser`)
 
@@ -52,6 +53,57 @@ fitz.open(pdf_path)
 - `export_recipes_to_json(recipes, output_dir, include_raw_text=True) -> None`
 - `export_corpus_to_json(recipes, output_path, include_raw_text=True) -> None`
 - `sanitize_filename(title: str, max_length: int = 80) -> str`
+
+### Vectorstore pipeline (`chefai.feed_embedder`)
+
+Entry point: `embed_recipes.py` (thin script — imports everything from `chefai.feed_embedder`).
+
+```
+RAW_FEED_DIR/feeds*.txt
+  └─ load_all_feed_files()     → DataFrame (deduped on guid)
+        └─ find_new_articles() → DataFrame (only guids absent from registry)
+              └─ assign_ids()  → DataFrame (monotonic int IDs, never reused)
+                    └─ build_documents() → List[Document]
+                          └─ run_embedding_batch()
+                                └─ (kitai.batch: build_embedding_tasks →
+                                    submit_batch_job → poll_until_complete →
+                                    download_batch_results → parse_embedding_results)
+                                      └─ align_pairs_to_docs()
+                                            ├─ init_vectorstore()   [cold start]
+                                            └─ update_vectorstore() [incremental]
+                                                  └─ store.save_local() → VECTORSTORE_DIR
+                                                        └─ save_registry() → feeds_registry.tsv
+```
+
+**Public API:**
+- `load_registry() -> pd.DataFrame`
+- `save_registry(registry: pd.DataFrame) -> None`
+- `load_all_feed_files() -> pd.DataFrame`
+- `find_new_articles(all_df, registry) -> pd.DataFrame`
+- `assign_ids(new_df, registry) -> pd.DataFrame`
+- `build_documents(new_df) -> list[Document]`
+- `run_embedding_batch(docs, client, *, embed_model, poll_interval) -> list[tuple[str, list[float]]]`
+- `align_pairs_to_docs(pairs, docs) -> tuple[aligned_pairs, aligned_docs]`
+- `init_vectorstore(docs, text_emb_pairs, embeddings_model) -> FAISS`
+- `update_vectorstore(text_emb_pairs, aligned_docs, embeddings_model) -> FAISS`
+
+**Module constants (overridable defaults):**
+- `REGISTRY_COLUMNS = ["id", "date", "title", "link", "guid"]`
+- `DEFAULT_EMBED_MODEL = "text-embedding-3-small"`
+- `DEFAULT_EMBED_DIMS = 1536`
+- `DEFAULT_POLL_INTERVAL = 30`  (seconds)
+
+**Invariants:**
+- `metadata["id"]` is a monotonic integer, never reused across runs.
+- Registry is written AFTER `store.save_local()` — a store write failure leaves the registry at its previous consistent state.
+- The registry's `guid` column is the single source of truth for what is in the FAISS store.
+- `custom_id` in embedding tasks == raw `doc.metadata["id"]` value (no prefix).
+
+**Failure modes:**
+- Batch API error/expiry → `RuntimeError`; registry untouched; next run retries.
+- Partial batch failure → affected docs dropped silently; retried next run.
+- FAISS save fails → registry not written; consistent state preserved.
+- `load_all_feed_files` / `find_new_articles` call `sys.exit(0)` for no-op conditions.
 
 ## Key invariants — extractor state machine
 
@@ -179,9 +231,10 @@ the corpus is still written.
 
 ## Logging
 
-All modules use `logging.getLogger(__name__)`. `extractor.py` calls
-`logging.basicConfig(level=INFO)` at module level (convenience for scripts);
-callers can override with `force=True`. `parser.py` does the same.
+All modules use `logging.getLogger(__name__)`.
+
+- `extractor.py` and `parser.py` call `logging.basicConfig(level=INFO)` at module level (convenience for direct script use); callers can override with `force=True`.
+- `feed_embedder.py` does **not** call `basicConfig` — it is a library module; the entry-point script (`embed_recipes.py`) configures the handler.
 
 ## Running tests
 
@@ -190,11 +243,17 @@ callers can override with `force=True`. `parser.py` does the same.
 venv/Scripts/python.exe -m pytest tests/ -v
 ```
 
-55 tests covering `sanitize_filename`, `_split_ingredient_line`,
+74 tests across two suites:
+
+**`tests/test_chefai.py`** (54 tests) — `sanitize_filename`, `_split_ingredient_line`,
 `parse_preparazioni_md` (unit + integration against real files),
 `export_recipes_to_markdown` (round-trip, dedup, type guard, empty input),
 `export_recipes_to_json`, `export_corpus_to_json`, `build_corpus`, and
 `__version__`.
+
+**`tests/test_feed_embedder.py`** (20 tests) — all functions in `chefai.feed_embedder`:
+registry round-trip, feed loading, article filtering, ID assignment, document building,
+pair alignment, and `run_embedding_batch` (mocked kitai.batch).
 
 Real-file integration tests are skipped automatically when the corresponding
 source file or directory is absent:

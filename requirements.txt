@@ -1,7 +1,22 @@
 # Runtime dependencies — pin versions for reproducibility.
 # Install with: pip install -r requirements.txt
-#
-# Example:
-# langchain-core>=0.3
-# numpy>=1.26
-# pandas>=2.2
+
+# LangChain ecosystem (langchain-openai<1.0 keeps langchain-core in the 0.3.x range)
+langchain>=0.3
+langchain-community>=0.3
+langchain-core>=0.3,<1.0
+langchain-openai>=0.3,<1.0
+
+# Vector store
+faiss-cpu>=1.7
+
+# Embedding / batch jobs
+openai>=1.0
+kitai>=0.1
+
+# Data
+numpy>=1.26
+pandas>=2.2
+
+# Utilities
+python-dotenv>=1.0
