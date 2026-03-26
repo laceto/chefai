@@ -1,12 +1,12 @@
 """
 chefai.feed_embedder
 Reusable helpers for building and incrementally updating a FAISS vectorstore
-from RSS feed articles using the OpenAI Batch API via kitai.
+from the recipe corpus (data/recipes.json) using the OpenAI Batch API via kitai.
 
 Public API
 ----------
 Constants:
-    REGISTRY_COLUMNS      — TSV column order for the article registry
+    REGISTRY_COLUMNS      — TSV column order for the recipe registry
     DEFAULT_EMBED_MODEL   — "text-embedding-3-small"
     DEFAULT_EMBED_DIMS    — 1536
     DEFAULT_POLL_INTERVAL — 30 (seconds between batch-status polls)
@@ -15,16 +15,16 @@ Registry:
     load_registry()               -> pd.DataFrame
     save_registry(registry)       -> None
 
-Feed loading:
-    load_all_feed_files()                    -> pd.DataFrame
-    find_new_articles(all_df, registry)      -> pd.DataFrame
+Recipe loading:
+    load_all_recipes()                       -> pd.DataFrame
+    find_new_recipes(all_df, registry)       -> pd.DataFrame
     assign_ids(new_df, registry)             -> pd.DataFrame
 
 Document building:
     build_documents(new_df)                  -> list[Document]
 
 Embedding batch:
-    run_embedding_batch(docs, client, *, embed_model, poll_interval)
+    run_embedding_batch(docs, client, *, embed_model, embed_dimensions, poll_interval)
                                              -> list[tuple[str, list[float]]]
     align_pairs_to_docs(pairs, docs)         -> (aligned_pairs, aligned_docs)
 
@@ -36,12 +36,12 @@ Vectorstore:
 Invariants
 ----------
 - metadata["id"] is a monotonic integer, never reused across runs.
-- feeds_registry.tsv is saved AFTER store.save_local() — a write failure
+- recipes_registry.tsv is saved AFTER store.save_local() — a write failure
   leaves the registry consistent with the previous successful state.
-- The registry's guid column is the single source of truth for what is in
-  the FAISS store. FAISS contents ≡ guids in feeds_registry.tsv.
-- Deduplication key: guid (stable RSS-feed identifier per article).
-- custom_id in embedding tasks == raw doc.metadata["id"] value (no prefix).
+- The registry's recipe_id column is the single source of truth for what is
+  in the FAISS store. FAISS contents ≡ recipe_ids in recipes_registry.tsv.
+- Deduplication key: recipe_id = "{source_file}::{title}" — stable per recipe.
+- custom_id in embedding tasks == str(doc.metadata["id"]) (no prefix).
 
 Failure modes
 -------------
@@ -50,11 +50,12 @@ Failure modes
 - FAISS save fails        → registry not written; consistent state preserved.
 - All embeddings fail     → caller receives ([], []) and decides how to exit.
 
-Note: load_all_feed_files and find_new_articles call sys.exit(0) for no-op
-conditions (no files found / nothing new).  This is intentional for CLI use;
+Note: load_all_recipes and find_new_recipes call sys.exit(0) for no-op
+conditions (corpus missing / nothing new).  This is intentional for CLI use;
 callers that need programmatic control should guard those cases themselves.
 """
 
+import json
 import logging
 import sys
 
@@ -65,7 +66,7 @@ from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 
-from constants import FEEDS_REGISTRY_FILE, RAW_FEED_DIR, VECTORSTORE_DIR
+from constants import FEEDS_REGISTRY_FILE, RECIPES_CORPUS_FILE, VECTORSTORE_DIR
 from kitai.batch import (
     build_embedding_tasks,
     download_batch_results,
@@ -79,7 +80,7 @@ log = logging.getLogger(__name__)
 
 # ── Module-level defaults ──────────────────────────────────────────────────────
 
-REGISTRY_COLUMNS      = ["id", "date", "title", "link", "guid"]
+REGISTRY_COLUMNS      = ["id", "recipe_id", "title", "source_file"]
 DEFAULT_EMBED_MODEL   = "text-embedding-3-small"
 DEFAULT_EMBED_DIMS    = 1536
 DEFAULT_POLL_INTERVAL = 30  # seconds
@@ -88,20 +89,20 @@ DEFAULT_POLL_INTERVAL = 30  # seconds
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 def load_registry() -> pd.DataFrame:
-    """Load the article registry, or return an empty frame if it does not exist.
+    """Load the recipe registry, or return an empty frame if it does not exist.
 
-    The registry is the ground truth for which articles are in the FAISS store.
+    The registry is the ground truth for which recipes are in the FAISS store.
 
     Returns:
-        DataFrame with columns: id (int), date (str), title (str),
-        link (str), guid (str).
+        DataFrame with columns: id (int), recipe_id (str), title (str),
+        source_file (str).
     """
     if not FEEDS_REGISTRY_FILE.exists():
         log.info("Registry not found — starting fresh.")
         return pd.DataFrame(columns=REGISTRY_COLUMNS).astype({"id": int})
 
     df = pd.read_csv(FEEDS_REGISTRY_FILE, sep="\t", dtype={"id": int})
-    log.info("Loaded registry: %d articles.", len(df))
+    log.info("Loaded registry: %d recipes.", len(df))
     return df
 
 
@@ -118,67 +119,69 @@ def save_registry(registry: pd.DataFrame) -> None:
     tmp_path = FEEDS_REGISTRY_FILE.with_suffix(".tmp")
     registry.to_csv(tmp_path, sep="\t", index=False)
     tmp_path.replace(FEEDS_REGISTRY_FILE)
-    log.info("Registry saved: %d articles total.", len(registry))
+    log.info("Registry saved: %d recipes total.", len(registry))
 
 
-# ── Feed loading ──────────────────────────────────────────────────────────────
+# ── Recipe loading ────────────────────────────────────────────────────────────
 
-def load_all_feed_files() -> pd.DataFrame:
-    """Load all top-level RAW_FEED_DIR/feeds*.txt files into a single DataFrame.
+def load_all_recipes() -> pd.DataFrame:
+    """Load all recipes from the corpus JSON file (RECIPES_CORPUS_FILE).
 
-    Top-level only (no recursion into subdirectories).
+    The corpus is built by scripts/build_corpus.py from data/processed/*.md.
+    Each record must carry a 'title' and 'source_file' field; 'ingredients'
+    and 'instructions' are optional but improve embedding quality.
 
-    Deduplicates on guid (stable per-article identifier from the RSS feed).
-    Adds a 'date' column (YYYY-MM-DD) derived from pubDate.
+    Adds a 'recipe_id' column — a stable dedup key formed as
+    "{source_file}::{title}".
 
     Returns:
-        DataFrame with columns: link, guid, type, id, sponsored, title,
-        description, pubDate, date.
+        DataFrame with all recipe corpus fields plus 'recipe_id'.
 
-    Exits 0 if no feed files are found.
+    Exits 0 if the corpus file does not exist.
     """
-    feed_files = sorted(RAW_FEED_DIR.glob("feeds*.txt"))
-    if not feed_files:
-        log.error("No feed files found in %s. Exiting.", RAW_FEED_DIR)
+    if not RECIPES_CORPUS_FILE.exists():
+        log.error(
+            "Corpus not found at %s. Run scripts/build_corpus.py first. Exiting.",
+            RECIPES_CORPUS_FILE,
+        )
         sys.exit(0)
 
-    raw_dfs  = [pd.read_csv(f, sep="\t") for f in feed_files]
-    combined = pd.concat(raw_dfs, ignore_index=True)
-    combined = combined.drop_duplicates(subset=["guid"])
-    combined["date"] = pd.to_datetime(combined["pubDate"]).dt.strftime("%Y-%m-%d")
+    with RECIPES_CORPUS_FILE.open(encoding="utf-8") as f:
+        records = json.load(f)
 
-    log.info(
-        "Loaded %d unique articles from %d file(s).",
-        len(combined),
-        len(feed_files),
+    df = pd.DataFrame(records)
+    df["recipe_id"] = (
+        df["source_file"].fillna("unknown") + "::" + df["title"]
     )
-    return combined
+
+    log.info("Loaded %d recipes from corpus.", len(df))
+    return df
 
 
-def find_new_articles(all_df: pd.DataFrame, registry: pd.DataFrame) -> pd.DataFrame:
-    """Return rows whose guid is not yet recorded in the registry.
+def find_new_recipes(all_df: pd.DataFrame, registry: pd.DataFrame) -> pd.DataFrame:
+    """Return rows whose recipe_id is not yet recorded in the registry.
 
     Exits 0 cleanly if there is nothing new to embed.
     """
-    known_guids = set(registry["guid"]) if not registry.empty else set()
-    new_df = all_df[~all_df["guid"].isin(known_guids)].copy()
+    known_ids = set(registry["recipe_id"]) if not registry.empty else set()
+    new_df = all_df[~all_df["recipe_id"].isin(known_ids)].copy()
 
     log.info(
-        "%d total articles | %d already embedded | %d new",
+        "%d total recipes | %d already embedded | %d new",
         len(all_df),
-        len(known_guids),
+        len(known_ids),
         len(new_df),
     )
 
     if new_df.empty:
-        log.info("No new articles to embed. Exiting.")
+        log.info("No new recipes to embed. Exiting.")
         sys.exit(0)
 
     return new_df
 
 
 def assign_ids(new_df: pd.DataFrame, registry: pd.DataFrame) -> pd.DataFrame:
-    """Assign globally unique monotonic integer IDs to new articles.
+    """Assign globally unique monotonic integer IDs to new recipes.
 
     Continues from max(registry.id) + 1, or starts at 0 on the first run.
     IDs are never reused.
@@ -193,32 +196,36 @@ def assign_ids(new_df: pd.DataFrame, registry: pd.DataFrame) -> pd.DataFrame:
 # ── Document building ─────────────────────────────────────────────────────────
 
 def build_documents(new_df: pd.DataFrame) -> list[Document]:
-    """Convert feed rows to LangChain Documents ready for batch embedding.
+    """Convert recipe rows to LangChain Documents ready for batch embedding.
 
-    Content format: "{date}: {title}: {description}"
+    Content format:
+        "{title}. Ingredienti: {ingredients}. Preparazione: {instructions}"
+
+    Ingredients are joined with "; " and instructions with " " so the full
+    recipe text is a single searchable string.
 
     Each document carries:
-        metadata["id"]    (int)  — docstore key in the FAISS store
-        metadata["date"]  (str)  — YYYY-MM-DD
-        metadata["title"] (str)  — article headline
-        metadata["link"]  (str)  — article URL
-        metadata["guid"]  (str)  — stable RSS article identifier
+        metadata["id"]          (int) — docstore key in the FAISS store
+        metadata["recipe_id"]   (str) — "{source_file}::{title}" dedup key
+        metadata["title"]       (str) — recipe name
+        metadata["source_file"] (str) — stem of the source .md file
     """
     docs = []
     for _, row in new_df.iterrows():
+        ingredients  = row.get("ingredients")  or []
+        instructions = row.get("instructions") or []
         content = (
-            f"{row['date']}: "
-            f"{str(row['title']).strip()}: "
-            f"{str(row['description']).strip()}"
+            f"{row['title']}. "
+            f"Ingredienti: {'; '.join(str(i) for i in ingredients)}. "
+            f"Preparazione: {' '.join(str(s) for s in instructions)}"
         )
         docs.append(Document(
             page_content=content,
             metadata={
-                "id":    int(row["id"]),
-                "date":  str(row["date"]),
-                "title": str(row["title"]),
-                "link":  str(row["link"]),
-                "guid":  str(row["guid"]),
+                "id":          int(row["id"]),
+                "recipe_id":   str(row["recipe_id"]),
+                "title":       str(row["title"]),
+                "source_file": str(row.get("source_file", "")),
             },
         ))
 
@@ -233,7 +240,8 @@ def run_embedding_batch(
     client: OpenAI,
     *,
     embed_model: str = DEFAULT_EMBED_MODEL,
-    poll_interval: int = DEFAULT_POLL_INTERVAL,
+    embed_dimensions: int = DEFAULT_EMBED_DIMS,
+    poll_interval: float = DEFAULT_POLL_INTERVAL,
 ) -> list[tuple[str, list[float]]]:
     """Submit docs to the OpenAI Batch API and return (custom_id, embedding) pairs.
 
@@ -241,26 +249,26 @@ def run_embedding_batch(
         build_embedding_tasks → submit_batch_job → poll_until_complete
         → download_batch_results → parse_embedding_results
 
-    custom_id in results == raw doc.metadata["id"] value (no prefix).
+    custom_id in results == str(doc.metadata["id"]) — cast with int(cid) when aligning.
 
     Args:
-        docs:          Documents to embed.
-        client:        Initialised OpenAI client.
-        embed_model:   Embedding model name (default: DEFAULT_EMBED_MODEL).
-        poll_interval: Seconds between batch status polls (default: DEFAULT_POLL_INTERVAL).
+        docs:             Documents to embed.
+        client:           Initialised OpenAI client.
+        embed_model:      Embedding model name (default: DEFAULT_EMBED_MODEL).
+        embed_dimensions: Output vector dimensions (default: DEFAULT_EMBED_DIMS).
+        poll_interval:    Seconds between batch status polls (default: DEFAULT_POLL_INTERVAL).
 
     Raises:
         RuntimeError: If the batch job does not reach 'completed' status.
     """
-    tasks  = build_embedding_tasks(docs, model=embed_model)
-    job_id = submit_batch_job(client, tasks)
+    tasks  = build_embedding_tasks(docs, model=embed_model, dimensions=embed_dimensions)
+    job_id = submit_batch_job(client, tasks, metadata={"description": "recipes_embed"})
     log.info("Submitted embedding batch: %s (%d tasks)", job_id, len(tasks))
 
-    statuses = poll_until_complete(client, [job_id], poll_interval_seconds=poll_interval)
-    if statuses[job_id]["status"] != "completed":
+    completed_ids = poll_until_complete(client, [job_id], poll_interval=poll_interval)
+    if job_id not in completed_ids:
         raise RuntimeError(
-            f"Embedding batch {job_id} did not complete successfully "
-            f"(status={statuses[job_id]['status']}). "
+            f"Embedding batch {job_id} did not complete successfully. "
             "Check the OpenAI dashboard for details."
         )
 

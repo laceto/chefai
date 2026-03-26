@@ -16,7 +16,12 @@ RAW_FEED_DIR       = Path("output")
 PENDING_BATCH_FILE  = Path("data/embeddings") / "pending_sector_batch.txt"
 BATCH_FILE          = Path("data/embeddings") / "batch_tasks_sector.jsonl"
 
-# ── Feed vectorstore ─────────────────────────────────────────────────────────
+# ── Recipe corpus ────────────────────────────────────────────────────────────
+# Built by scripts/build_corpus.py from data/processed/*.md files.
+
+RECIPES_CORPUS_FILE = Path("data") / "recipes.json"
+
+# ── Recipe vectorstore ────────────────────────────────────────────────────────
 # FAISS index and registry produced by embed_recipes.py.
 # Change VECTORSTORE_DIR here to move the store; embed_recipes.py picks it up.
 

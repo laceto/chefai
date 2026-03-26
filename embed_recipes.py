@@ -1,17 +1,17 @@
 """
 embed_recipes.py
 Entry-point script: builds and incrementally updates a FAISS vectorstore
-from RSS feed articles using the OpenAI Batch API via kitai.
+from the recipe corpus (data/recipes.json) using the OpenAI Batch API via kitai.
 
 All logic lives in chefai.feed_embedder — import from there for programmatic use.
 
 Behaviour:
-- Cold start (no existing vectorstore): embeds ALL feed articles and creates
+- Cold start (no existing vectorstore): embeds ALL recipes and creates
   the store from scratch.
-- Incremental (store already exists): embeds only articles whose guid is not
+- Incremental (store already exists): embeds only recipes whose recipe_id is not
   yet in the registry, then appends them to the existing store via
   FAISS.add_embeddings (no rebuild required).
-- No-op: exits 0 cleanly if no new articles are found.
+- No-op: exits 0 cleanly if no new recipes are found.
 
 Run:
     python embed_recipes.py
@@ -37,9 +37,9 @@ from chefai.feed_embedder import (
     align_pairs_to_docs,
     assign_ids,
     build_documents,
-    find_new_articles,
+    find_new_recipes,
     init_vectorstore,
-    load_all_feed_files,
+    load_all_recipes,
     load_registry,
     run_embedding_batch,
     save_registry,
@@ -67,9 +67,9 @@ def main() -> None:
     # 1. Load existing state
     registry = load_registry()
 
-    # 2. Discover new articles (exits 0 if none)
-    all_df = load_all_feed_files()
-    new_df = find_new_articles(all_df, registry)
+    # 2. Discover new recipes (exits 0 if none)
+    all_df = load_all_recipes()
+    new_df = find_new_recipes(all_df, registry)
     new_df = assign_ids(new_df, registry)
 
     # 3. Build LangChain Documents
@@ -100,17 +100,16 @@ def main() -> None:
 
     # 8. Append new rows to the registry (atomic write)
     new_rows = pd.DataFrame({
-        "id":    [doc.metadata["id"]    for doc in aligned_docs],
-        "date":  [doc.metadata["date"]  for doc in aligned_docs],
-        "title": [doc.metadata["title"] for doc in aligned_docs],
-        "link":  [doc.metadata["link"]  for doc in aligned_docs],
-        "guid":  [doc.metadata["guid"]  for doc in aligned_docs],
+        "id":          [doc.metadata["id"]          for doc in aligned_docs],
+        "recipe_id":   [doc.metadata["recipe_id"]   for doc in aligned_docs],
+        "title":       [doc.metadata["title"]       for doc in aligned_docs],
+        "source_file": [doc.metadata["source_file"] for doc in aligned_docs],
     })
     updated_registry = pd.concat([registry, new_rows], ignore_index=True)
     save_registry(updated_registry)
 
     log.info(
-        "[done] Embedded %d new articles. Total in registry: %d.",
+        "[done] Embedded %d new recipes. Total in registry: %d.",
         len(aligned_docs),
         len(updated_registry),
     )

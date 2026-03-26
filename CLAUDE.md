@@ -9,7 +9,7 @@ chefai/
 ├── __init__.py        __version__ = "0.1.0"
 ├── parser.py          PDF pipeline — requires PyMuPDF (fitz) and tqdm
 ├── extractor.py       Markdown pipeline — stdlib only
-└── feed_embedder.py   FAISS vectorstore helpers for RSS feed article embeddings
+└── feed_embedder.py   FAISS vectorstore helpers for recipe corpus embeddings
 ```
 
 ## Three independent pipelines
@@ -59,9 +59,9 @@ fitz.open(pdf_path)
 Entry point: `embed_recipes.py` (thin script — imports everything from `chefai.feed_embedder`).
 
 ```
-RAW_FEED_DIR/feeds*.txt
-  └─ load_all_feed_files()     → DataFrame (deduped on guid)
-        └─ find_new_articles() → DataFrame (only guids absent from registry)
+RECIPES_CORPUS_FILE (data/recipes.json)
+  └─ load_all_recipes()        → DataFrame (with recipe_id column)
+        └─ find_new_recipes()  → DataFrame (only recipe_ids absent from registry)
               └─ assign_ids()  → DataFrame (monotonic int IDs, never reused)
                     └─ build_documents() → List[Document]
                           └─ run_embedding_batch()
@@ -72,38 +72,41 @@ RAW_FEED_DIR/feeds*.txt
                                             ├─ init_vectorstore()   [cold start]
                                             └─ update_vectorstore() [incremental]
                                                   └─ store.save_local() → VECTORSTORE_DIR
-                                                        └─ save_registry() → feeds_registry.tsv
+                                                        └─ save_registry() → recipes_registry.tsv
 ```
 
 **Public API:**
 - `load_registry() -> pd.DataFrame`
 - `save_registry(registry: pd.DataFrame) -> None`
-- `load_all_feed_files() -> pd.DataFrame`
-- `find_new_articles(all_df, registry) -> pd.DataFrame`
+- `load_all_recipes() -> pd.DataFrame`
+- `find_new_recipes(all_df, registry) -> pd.DataFrame`
 - `assign_ids(new_df, registry) -> pd.DataFrame`
 - `build_documents(new_df) -> list[Document]`
-- `run_embedding_batch(docs, client, *, embed_model, poll_interval) -> list[tuple[str, list[float]]]`
+- `run_embedding_batch(docs, client, *, embed_model, embed_dimensions, poll_interval) -> list[tuple[str, list[float]]]`
 - `align_pairs_to_docs(pairs, docs) -> tuple[aligned_pairs, aligned_docs]`
 - `init_vectorstore(docs, text_emb_pairs, embeddings_model) -> FAISS`
 - `update_vectorstore(text_emb_pairs, aligned_docs, embeddings_model) -> FAISS`
 
 **Module constants (overridable defaults):**
-- `REGISTRY_COLUMNS = ["id", "date", "title", "link", "guid"]`
+- `REGISTRY_COLUMNS = ["id", "recipe_id", "title", "source_file"]`
 - `DEFAULT_EMBED_MODEL = "text-embedding-3-small"`
 - `DEFAULT_EMBED_DIMS = 1536`
 - `DEFAULT_POLL_INTERVAL = 30`  (seconds)
 
+**Document content format:**
+- `"{title}. Ingredienti: {ingredients joined by '; '}. Preparazione: {instructions joined by ' '}"`
+
 **Invariants:**
 - `metadata["id"]` is a monotonic integer, never reused across runs.
 - Registry is written AFTER `store.save_local()` — a store write failure leaves the registry at its previous consistent state.
-- The registry's `guid` column is the single source of truth for what is in the FAISS store.
+- The registry's `recipe_id` column (`"{source_file}::{title}"`) is the single source of truth for what is in the FAISS store.
 - `custom_id` in embedding tasks == raw `doc.metadata["id"]` value (no prefix).
 
 **Failure modes:**
 - Batch API error/expiry → `RuntimeError`; registry untouched; next run retries.
 - Partial batch failure → affected docs dropped silently; retried next run.
 - FAISS save fails → registry not written; consistent state preserved.
-- `load_all_feed_files` / `find_new_articles` call `sys.exit(0)` for no-op conditions.
+- `load_all_recipes` / `find_new_recipes` call `sys.exit(0)` for no-op conditions.
 
 ## Key invariants — extractor state machine
 
@@ -252,7 +255,7 @@ venv/Scripts/python.exe -m pytest tests/ -v
 `__version__`.
 
 **`tests/test_feed_embedder.py`** (20 tests) — all functions in `chefai.feed_embedder`:
-registry round-trip, feed loading, article filtering, ID assignment, document building,
+registry round-trip, recipe corpus loading, recipe filtering, ID assignment, document building,
 pair alignment, and `run_embedding_batch` (mocked kitai.batch).
 
 Real-file integration tests are skipped automatically when the corresponding

@@ -12,8 +12,8 @@ preprocessed .md ──► chefai.extractor ──► per-recipe .md files
                               ▼
                     scripts/build_corpus.py ──► data/recipes.json
 
-RSS feed TSV files ──► chefai.feed_embedder ──► FAISS vectorstore
-  (via embed_recipes.py)                         + feeds_registry.tsv
+data/recipes.json ──► chefai.feed_embedder ──► FAISS vectorstore
+  (via embed_recipes.py)                          + recipes_registry.tsv
 ```
 
 ## Installation
@@ -105,14 +105,14 @@ export_corpus_to_json(recipes, output_path="data/recipes.json")
 
 ### Pipeline 3 — FAISS vectorstore (`chefai.feed_embedder`)
 
-Builds and incrementally updates a FAISS vectorstore from RSS feed articles
+Builds and incrementally updates a FAISS vectorstore from `data/recipes.json`
 using the OpenAI Batch API (50% cheaper than synchronous calls via kitai).
 
 ```bash
-# cold start — embeds all feed articles and creates the store from scratch
+# cold start — embeds all recipes and creates the store from scratch
 python embed_recipes.py
 
-# incremental — embeds only new guids and appends to the existing store
+# incremental — embeds only new recipe_ids and appends to the existing store
 python embed_recipes.py
 
 # set LOG_LEVEL=DEBUG for detailed batch polling output
@@ -120,6 +120,7 @@ LOG_LEVEL=DEBUG python embed_recipes.py
 ```
 
 Requires `OPENAI_API_KEY` in the environment (loaded from `.env`).
+Run `python scripts/build_corpus.py` first to produce `data/recipes.json`.
 
 All reusable logic lives in `chefai.feed_embedder`; import from there for
 programmatic use:
@@ -127,7 +128,7 @@ programmatic use:
 ```python
 from chefai.feed_embedder import (
     load_registry, save_registry,
-    load_all_feed_files, find_new_articles, assign_ids,
+    load_all_recipes, find_new_recipes, assign_ids,
     build_documents,
     run_embedding_batch, align_pairs_to_docs,
     init_vectorstore, update_vectorstore,
@@ -220,7 +221,7 @@ chefai/
 │   ├── __init__.py          # __version__ = "0.1.0"
 │   ├── parser.py            # PDF pipeline (requires PyMuPDF)
 │   ├── extractor.py         # Markdown pipeline
-│   └── feed_embedder.py     # FAISS vectorstore helpers (RSS feed embeddings)
+│   └── feed_embedder.py     # FAISS vectorstore helpers (recipe corpus embeddings)
 ├── scripts/
 │   └── build_corpus.py      # Batch-parse all section files → data/recipes.json
 ├── data/
@@ -228,7 +229,7 @@ chefai/
 ├── tests/
 │   ├── test_chefai.py       # pytest suite (54 tests — parser + extractor)
 │   └── test_feed_embedder.py# pytest suite (20 tests — feed_embedder)
-├── embed_recipes.py         # Entry-point: build/update FAISS vectorstore from feeds
+├── embed_recipes.py         # Entry-point: build/update FAISS vectorstore from recipe corpus
 ├── constants.py             # Shared file paths (VECTORSTORE_DIR, RAW_FEED_DIR, …)
 ├── extractor_guide.ipynb    # User guide for chefai.extractor
 ├── pyproject.toml
