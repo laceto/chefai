@@ -100,7 +100,7 @@ RECIPES_CORPUS_FILE (data/recipes.json)
 - `metadata["id"]` is a monotonic integer, never reused across runs.
 - Registry is written AFTER `store.save_local()` — a store write failure leaves the registry at its previous consistent state.
 - The registry's `recipe_id` column (`"{source_file}::{title}"`) is the single source of truth for what is in the FAISS store.
-- `custom_id` in embedding tasks == raw `doc.metadata["id"]` value (no prefix).
+- `custom_id` in embedding tasks == `"custom_id_" + str(doc.metadata["id"])` (kitai prefix); `align_pairs_to_docs` strips it before alignment.
 
 **Failure modes:**
 - Batch API error/expiry → `RuntimeError`; registry untouched; next run retries.

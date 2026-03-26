@@ -41,7 +41,7 @@ Invariants
 - The registry's recipe_id column is the single source of truth for what is
   in the FAISS store. FAISS contents ≡ recipe_ids in recipes_registry.tsv.
 - Deduplication key: recipe_id = "{source_file}::{title}" — stable per recipe.
-- custom_id in embedding tasks == str(doc.metadata["id"]) (no prefix).
+- custom_id in embedding tasks == "custom_id_" + str(doc.metadata["id"]) (kitai prefix).
 
 Failure modes
 -------------
@@ -249,7 +249,7 @@ def run_embedding_batch(
         build_embedding_tasks → submit_batch_job → poll_until_complete
         → download_batch_results → parse_embedding_results
 
-    custom_id in results == str(doc.metadata["id"]) — cast with int(cid) when aligning.
+    custom_id in results == "custom_id_" + str(doc.metadata["id"]) — align_pairs_to_docs strips the prefix.
 
     Args:
         docs:             Documents to embed.
@@ -291,7 +291,7 @@ def align_pairs_to_docs(
 
     Args:
         pairs: List of (custom_id, embedding) from parse_embedding_results.
-               custom_id is the raw doc.metadata["id"] value (int cast to str).
+               custom_id has the kitai prefix "custom_id_N"; the prefix is stripped here.
         docs:  Original document list in submission order.
 
     Returns:
@@ -299,7 +299,9 @@ def align_pairs_to_docs(
             FAISS.add_embeddings or create_vectorstore.
         aligned_docs: Corresponding Document list (same order, failures excluded).
     """
-    emb_by_id = {int(cid): emb for cid, emb in pairs}
+    # kitai.build_embedding_tasks prefixes custom_id with "custom_id_"
+    # e.g. doc.metadata["id"] == 0 → custom_id == "custom_id_0"
+    emb_by_id = {int(cid.removeprefix("custom_id_")): emb for cid, emb in pairs}
 
     aligned_pairs: list[tuple[str, list[float]]] = []
     aligned_docs:  list[Document] = []

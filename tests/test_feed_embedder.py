@@ -281,9 +281,13 @@ def test_build_documents_metadata_keys(sample_recipe_df):
 
 
 def test_align_pairs_all_match(sample_docs):
-    """All docs are aligned when every id has a matching embedding."""
+    """All docs are aligned when every id has a matching embedding.
+
+    kitai.build_embedding_tasks prefixes custom_id with 'custom_id_', so pairs
+    arrive as [('custom_id_0', emb), ...] — align_pairs_to_docs must strip it.
+    """
     fake_emb = [0.1] * 8
-    pairs = [(str(doc.metadata["id"]), fake_emb) for doc in sample_docs]
+    pairs = [(f"custom_id_{doc.metadata['id']}", fake_emb) for doc in sample_docs]
 
     aligned_pairs, aligned_docs = fe.align_pairs_to_docs(pairs, sample_docs)
 
@@ -296,7 +300,7 @@ def test_align_pairs_missing_embedding_dropped(sample_docs):
     """A doc with no returned embedding is silently dropped; the rest are kept."""
     fake_emb = [0.1] * 8
     # Only supply embeddings for ids 0 and 2 — id 1 (Bruschetta) is missing.
-    pairs = [("0", fake_emb), ("2", fake_emb)]
+    pairs = [("custom_id_0", fake_emb), ("custom_id_2", fake_emb)]
 
     aligned_pairs, aligned_docs = fe.align_pairs_to_docs(pairs, sample_docs)
 
@@ -333,7 +337,7 @@ def test_run_embedding_batch_success(
     mock_submit.return_value   = "batch_test123"
     mock_poll.return_value     = ["batch_test123"]
     mock_download.return_value = [{}]  # content irrelevant — parse is mocked
-    mock_parse.return_value    = [("0", fake_emb), ("1", fake_emb), ("2", fake_emb)]
+    mock_parse.return_value    = [("custom_id_0", fake_emb), ("custom_id_1", fake_emb), ("custom_id_2", fake_emb)]
 
     client = MagicMock()
     pairs  = fe.run_embedding_batch(sample_docs, client)
